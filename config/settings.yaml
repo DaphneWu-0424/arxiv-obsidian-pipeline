@@ -1,0 +1,9 @@
+vault_path: 'D:\obsidian_project\arxiv'
+papers_root: "Papers"
+gmail_label: "Arxiv/Daily"
+lookback_hours: 48
+max_papers_per_run: 20
+use_pdf_summary: false
+database_path: "data/pipeline.db"
+log_dir: "data/logs"
+pdf_cache_dir: "data/pdfs"
