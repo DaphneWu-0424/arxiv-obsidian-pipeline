@@ -67,7 +67,6 @@ def summarize_from_abstract(metadata: Dict[str, Any]) -> Dict[str, Any]:
     if not api_key:
         raise ValueError("AI_API_KEY 未配置")
     
-    print(f"AI_API_KEY={api_key}")
     print(f"AI_BASE_URL={base_url}")
     print(f"AI_MODEL={model}")
 
