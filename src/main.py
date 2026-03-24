@@ -5,6 +5,7 @@ import re
 import traceback
 from datetime import datetime
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import yaml
 from dotenv import load_dotenv
@@ -98,6 +99,48 @@ def load_index_items_from_vault(vault_path: str, papers_root: str, date_folder: 
     return items
 
 
+def process_one_paper(
+    p: dict,
+    email_date_folder: str,
+    vault_path: str,
+    papers_root: str,
+) -> dict:
+    """
+    线程池里只做耗时工作：
+    - AI 摘要
+    - Markdown 生成
+    - 文件写入
+
+    不在这里写数据库，避免 SQLite 并发写锁问题。
+    """
+    arxiv_id = p["arxiv_id"]
+    title = p["title"]
+
+    summary_result = summarize_from_abstract(p)
+
+    note_content = build_paper_note(
+        paper=p,
+        summary=summary_result,
+        date_folder=email_date_folder,
+    )
+
+    note_path = write_paper_note(
+        vault_path=vault_path,
+        papers_root=papers_root,
+        date_folder=email_date_folder,
+        arxiv_id=arxiv_id,
+        title=title,
+        content=note_content,
+    )
+
+    return {
+        "arxiv_id": arxiv_id,
+        "title": title,
+        "note_path": str(note_path),
+        "one_sentence_summary": summary_result["one_sentence_summary"],
+    }
+
+
 def main() -> None:
     settings = load_settings()
 
@@ -109,6 +152,7 @@ def main() -> None:
     gmail_label = settings["gmail_label"]
     db_path = settings["database_path"]
     max_papers_per_run = int(settings.get("max_papers_per_run", 20))
+    max_workers = int(settings.get("max_workers", 3))
 
     init_db(db_path)
 
@@ -127,11 +171,10 @@ def main() -> None:
         try:
             detail = get_message_text(session, gmail_message_id)
             subject = detail["subject"]
-            body = detail["body"]
+
+            body = detail.get("body", "")
             body_text = detail.get("body_text", "")
             body_html = detail.get("body_html", "")
-            print("body_text length:", len(body_text))
-            print("body_html length:", len(body_html))
 
             email_date_folder = detail["date_folder"]
             if not email_date_folder:
@@ -149,6 +192,7 @@ def main() -> None:
             arxiv_ids.update(extract_arxiv_ids_from_content(body_text))
             arxiv_ids.update(extract_arxiv_ids_from_content(body_html))
             arxiv_ids = sorted(arxiv_ids)
+
             print(f"提取到 {len(arxiv_ids)} 个 arXiv ID")
 
             if not arxiv_ids:
@@ -160,7 +204,7 @@ def main() -> None:
                     status="failed",
                     error_message="No arXiv IDs extracted from email body",
                 )
-                print(f"邮件没有提取到论文，标记失败待后续重试: {gmail_message_id}")
+                print(f"邮件未提取到论文，标记失败待后续重试: {gmail_message_id}")
                 continue
 
             all_pending_ids = [
@@ -187,60 +231,62 @@ def main() -> None:
             papers = fetch_batch_metadata(batch_ids)
             print(f"从 arXiv API 获取到 {len(papers)} 篇元数据")
 
-            for p in papers:
-                arxiv_id = p["arxiv_id"]
-                title = p["title"]
+            worker_count = max(1, min(max_workers, len(papers)))
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_to_paper = {}
 
-                if is_paper_successful(db_path, arxiv_id, email_date_folder):
-                    print(f"跳过已处理论文: {arxiv_id}")
-                    continue
+                for p in papers:
+                    arxiv_id = p["arxiv_id"]
 
-                try:
-                    summary_result = summarize_from_abstract(p)
+                    if is_paper_successful(db_path, arxiv_id, email_date_folder):
+                        print(f"跳过已处理论文: {arxiv_id}")
+                        continue
 
-                    note_content = build_paper_note(
-                        paper=p,
-                        summary=summary_result,
-                        date_folder=email_date_folder,
+                    future = executor.submit(
+                        process_one_paper,
+                        p,
+                        email_date_folder,
+                        vault_path,
+                        papers_root,
                     )
+                    future_to_paper[future] = p
 
-                    note_path = write_paper_note(
-                        vault_path=vault_path,
-                        papers_root=papers_root,
-                        date_folder=email_date_folder,
-                        arxiv_id=arxiv_id,
-                        title=title,
-                        content=note_content,
-                    )
+                for future in as_completed(future_to_paper):
+                    p = future_to_paper[future]
+                    arxiv_id = p["arxiv_id"]
+                    title = p["title"]
 
-                    mark_paper_processed(
-                        db_path=db_path,
-                        arxiv_id=arxiv_id,
-                        date_folder=email_date_folder,
-                        gmail_message_id=gmail_message_id,
-                        title=title,
-                        note_path=str(note_path),
-                        processed_at=now_iso(),
-                        status="success",
-                    )
+                    try:
+                        result = future.result()
 
-                    processed_count += 1
-                    print(f"写入成功: {note_path}")
+                        mark_paper_processed(
+                            db_path=db_path,
+                            arxiv_id=arxiv_id,
+                            date_folder=email_date_folder,
+                            gmail_message_id=gmail_message_id,
+                            title=title,
+                            note_path=result["note_path"],
+                            processed_at=now_iso(),
+                            status="success",
+                        )
 
-                except Exception as e:
-                    mark_paper_processed(
-                        db_path=db_path,
-                        arxiv_id=arxiv_id,
-                        date_folder=email_date_folder,
-                        gmail_message_id=gmail_message_id,
-                        title=title,
-                        note_path="",
-                        processed_at=now_iso(),
-                        status="failed",
-                        error_message=str(e),
-                    )
-                    print(f"处理论文失败: {arxiv_id} | {e}")
-                    traceback.print_exc()
+                        processed_count += 1
+                        print(f"写入成功: {result['note_path']}")
+
+                    except Exception as e:
+                        mark_paper_processed(
+                            db_path=db_path,
+                            arxiv_id=arxiv_id,
+                            date_folder=email_date_folder,
+                            gmail_message_id=gmail_message_id,
+                            title=title,
+                            note_path="",
+                            processed_at=now_iso(),
+                            status="failed",
+                            error_message=str(e),
+                        )
+                        print(f"处理论文失败: {arxiv_id} | {e}")
+                        traceback.print_exc()
 
             remaining_ids = [
                 aid for aid in arxiv_ids

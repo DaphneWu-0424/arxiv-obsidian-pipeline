@@ -7,3 +7,4 @@ use_pdf_summary: false
 database_path: "data/pipeline.db"
 log_dir: "data/logs"
 pdf_cache_dir: "data/pdfs"
+max_workers: 3
