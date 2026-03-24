@@ -1,0 +1,7 @@
+# arXiv Daily - {{ date_folder }}
+
+共 {{ paper_count }} 篇
+
+{% for paper in papers %}
+- [[{{ paper.note_name }}]] — {{ paper.one_sentence_summary }}
+{% endfor %}
