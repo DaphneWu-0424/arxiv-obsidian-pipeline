@@ -128,6 +128,10 @@ def main() -> None:
             detail = get_message_text(session, gmail_message_id)
             subject = detail["subject"]
             body = detail["body"]
+            body_text = detail.get("body_text", "")
+            body_html = detail.get("body_html", "")
+            print("body_text length:", len(body_text))
+            print("body_html length:", len(body_html))
 
             email_date_folder = detail["date_folder"]
             if not email_date_folder:
@@ -140,7 +144,11 @@ def main() -> None:
             print("邮件接收时间:", detail["received_at"])
             print("目录日期:", email_date_folder)
 
-            arxiv_ids = extract_arxiv_ids_from_content(body)
+            arxiv_ids = set()
+            arxiv_ids.update(extract_arxiv_ids_from_content(body))
+            arxiv_ids.update(extract_arxiv_ids_from_content(body_text))
+            arxiv_ids.update(extract_arxiv_ids_from_content(body_html))
+            arxiv_ids = sorted(arxiv_ids)
             print(f"提取到 {len(arxiv_ids)} 个 arXiv ID")
 
             if not arxiv_ids:
@@ -149,9 +157,10 @@ def main() -> None:
                     gmail_message_id=gmail_message_id,
                     subject=subject,
                     processed_at=now_iso(),
-                    status="complete",
+                    status="failed",
+                    error_message="No arXiv IDs extracted from email body",
                 )
-                print(f"邮件没有提取到论文，标记完成: {gmail_message_id}")
+                print(f"邮件没有提取到论文，标记失败待后续重试: {gmail_message_id}")
                 continue
 
             all_pending_ids = [
