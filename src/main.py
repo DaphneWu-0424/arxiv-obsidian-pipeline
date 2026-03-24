@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+import re
 import traceback
+from datetime import datetime
+from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv
@@ -12,12 +14,11 @@ from email_parser import extract_arxiv_ids_from_content
 from arxiv_client import fetch_batch_metadata
 from summarizer import summarize_from_abstract
 from note_builder import build_paper_note, build_daily_index
-from obsidian_writer import write_paper_note, write_daily_index, make_note_filename
+from obsidian_writer import write_paper_note, write_daily_index
 from db import (
     init_db,
-    is_email_processed,
+    get_conn,
     mark_email_processed,
-    is_paper_processed,
     mark_paper_processed,
 )
 
@@ -31,6 +32,70 @@ def load_settings(path: str = "config/settings.yaml") -> dict:
 
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def is_paper_successful(db_path: str, arxiv_id: str, date_folder: str) -> bool:
+    """
+    只把 status=success 的论文视为“已完成”。
+    failed 记录下次仍然允许重试。
+    """
+    with get_conn(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT status
+            FROM processed_papers
+            WHERE arxiv_id = ? AND date_folder = ?
+            LIMIT 1
+            """,
+            (arxiv_id, date_folder),
+        ).fetchone()
+
+        return row is not None and row["status"] == "success"
+
+
+def extract_one_sentence_summary_from_note(note_text: str) -> str:
+    """
+    从已有 note 中提取 “## 一句话总结” 段落，用于重建 index.md。
+    """
+    match = re.search(
+        r"## 一句话总结\s*(.*?)\s*(?:\n## |\Z)",
+        note_text,
+        flags=re.S,
+    )
+    if not match:
+        return ""
+
+    summary = match.group(1).strip()
+    summary = re.sub(r"\s+", " ", summary)
+    return summary
+
+
+def load_index_items_from_vault(vault_path: str, papers_root: str, date_folder: str) -> list[dict]:
+    """
+    从当天文件夹里扫描所有论文 note，重建 index 所需的数据。
+    这样即使一封邮件分多次跑，index.md 也会包含当天已生成的全部 note。
+    """
+    folder = Path(vault_path) / papers_root / date_folder
+    if not folder.exists():
+        return []
+
+    items = []
+    for note_path in sorted(folder.glob("*.md")):
+        if note_path.name.lower() == "index.md":
+            continue
+
+        try:
+            text = note_path.read_text(encoding="utf-8")
+        except Exception:
+            text = ""
+
+        items.append({
+            "note_name": note_path.stem,
+            "one_sentence_summary": extract_one_sentence_summary_from_note(text),
+            "note_path": str(note_path),
+        })
+
+    return items
 
 
 def main() -> None:
@@ -52,12 +117,12 @@ def main() -> None:
 
     print(f"扫描到 {len(messages)} 封邮件")
 
-    index_items_by_date = {}
+    touched_dates: set[str] = set()
     processed_count = 0
 
     for m in messages:
         gmail_message_id = m["id"]
-
+        subject = ""
 
         try:
             detail = get_message_text(session, gmail_message_id)
@@ -68,11 +133,12 @@ def main() -> None:
             if not email_date_folder:
                 email_date_folder = datetime.now().strftime("%Y-%m-%d")
 
-            if email_date_folder not in index_items_by_date:
-                index_items_by_date[email_date_folder] = []
+            touched_dates.add(email_date_folder)
 
             print("=" * 60)
             print("邮件主题:", subject)
+            print("邮件接收时间:", detail["received_at"])
+            print("目录日期:", email_date_folder)
 
             arxiv_ids = extract_arxiv_ids_from_content(body)
             print(f"提取到 {len(arxiv_ids)} 个 arXiv ID")
@@ -83,37 +149,40 @@ def main() -> None:
                     gmail_message_id=gmail_message_id,
                     subject=subject,
                     processed_at=now_iso(),
-                    status="success",
+                    status="complete",
                 )
+                print(f"邮件没有提取到论文，标记完成: {gmail_message_id}")
                 continue
 
-            # 先按配置限流，再过滤掉今天已处理过的论文
-            limited_ids = arxiv_ids[:max_papers_per_run]
-            pending_ids = [
-                aid for aid in limited_ids
-                if not is_paper_processed(db_path, aid, email_date_folder)
+            all_pending_ids = [
+                aid for aid in arxiv_ids
+                if not is_paper_successful(db_path, aid, email_date_folder)
             ]
 
-            print(f"本次待处理论文数: {len(pending_ids)}")
+            print(f"该邮件剩余未处理论文数: {len(all_pending_ids)}")
 
-            if not pending_ids:
+            if not all_pending_ids:
                 mark_email_processed(
                     db_path=db_path,
                     gmail_message_id=gmail_message_id,
                     subject=subject,
                     processed_at=now_iso(),
-                    status="success",
+                    status="complete",
                 )
+                print(f"邮件已全部处理完成: {gmail_message_id}")
                 continue
 
-            papers = fetch_batch_metadata(pending_ids)
+            batch_ids = all_pending_ids[:max_papers_per_run]
+            print(f"本次实际处理论文数: {len(batch_ids)}")
+
+            papers = fetch_batch_metadata(batch_ids)
             print(f"从 arXiv API 获取到 {len(papers)} 篇元数据")
 
             for p in papers:
                 arxiv_id = p["arxiv_id"]
                 title = p["title"]
 
-                if is_paper_processed(db_path, arxiv_id, email_date_folder):
+                if is_paper_successful(db_path, arxiv_id, email_date_folder):
                     print(f"跳过已处理论文: {arxiv_id}")
                     continue
 
@@ -134,14 +203,6 @@ def main() -> None:
                         title=title,
                         content=note_content,
                     )
-
-                    note_name = make_note_filename(arxiv_id, title).replace(".md", "")
-
-                    index_items_by_date[email_date_folder].append({
-                        "note_name": note_name,
-                        "one_sentence_summary": summary_result["one_sentence_summary"],
-                        "note_path": str(note_path),
-                    })
 
                     mark_paper_processed(
                         db_path=db_path,
@@ -172,21 +233,36 @@ def main() -> None:
                     print(f"处理论文失败: {arxiv_id} | {e}")
                     traceback.print_exc()
 
-            mark_email_processed(
-                db_path=db_path,
-                gmail_message_id=gmail_message_id,
-                subject=subject,
-                processed_at=now_iso(),
-                status="success",
-            )
-            print("邮件接收时间:", detail["received_at"])
-            print("目录日期:", email_date_folder)
+            remaining_ids = [
+                aid for aid in arxiv_ids
+                if not is_paper_successful(db_path, aid, email_date_folder)
+            ]
+
+            if remaining_ids:
+                mark_email_processed(
+                    db_path=db_path,
+                    gmail_message_id=gmail_message_id,
+                    subject=subject,
+                    processed_at=now_iso(),
+                    status="partial",
+                    error_message=f"{len(remaining_ids)} papers remaining",
+                )
+                print(f"邮件部分完成，还剩 {len(remaining_ids)} 篇: {gmail_message_id}")
+            else:
+                mark_email_processed(
+                    db_path=db_path,
+                    gmail_message_id=gmail_message_id,
+                    subject=subject,
+                    processed_at=now_iso(),
+                    status="complete",
+                )
+                print(f"邮件全部完成: {gmail_message_id}")
 
         except Exception as e:
             mark_email_processed(
                 db_path=db_path,
                 gmail_message_id=gmail_message_id,
-                subject="",
+                subject=subject,
                 processed_at=now_iso(),
                 status="failed",
                 error_message=str(e),
@@ -194,7 +270,9 @@ def main() -> None:
             print(f"处理邮件失败: {gmail_message_id} | {e}")
             traceback.print_exc()
 
-    for date_folder, index_items in index_items_by_date.items():
+    # 每次运行后，重建本次涉及日期的完整 index.md
+    for date_folder in sorted(touched_dates):
+        index_items = load_index_items_from_vault(vault_path, papers_root, date_folder)
         if not index_items:
             continue
 
