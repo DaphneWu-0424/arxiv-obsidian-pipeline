@@ -52,21 +52,24 @@ def main() -> None:
 
     print(f"扫描到 {len(messages)} 封邮件")
 
-    date_folder = datetime.now().strftime("%Y-%m-%d")
-    index_items = []
+    index_items_by_date = {}
     processed_count = 0
 
     for m in messages:
         gmail_message_id = m["id"]
 
-        if is_email_processed(db_path, gmail_message_id):
-            print(f"跳过已处理邮件: {gmail_message_id}")
-            continue
 
         try:
             detail = get_message_text(session, gmail_message_id)
             subject = detail["subject"]
             body = detail["body"]
+
+            email_date_folder = detail["date_folder"]
+            if not email_date_folder:
+                email_date_folder = datetime.now().strftime("%Y-%m-%d")
+
+            if email_date_folder not in index_items_by_date:
+                index_items_by_date[email_date_folder] = []
 
             print("=" * 60)
             print("邮件主题:", subject)
@@ -88,7 +91,7 @@ def main() -> None:
             limited_ids = arxiv_ids[:max_papers_per_run]
             pending_ids = [
                 aid for aid in limited_ids
-                if not is_paper_processed(db_path, aid, date_folder)
+                if not is_paper_processed(db_path, aid, email_date_folder)
             ]
 
             print(f"本次待处理论文数: {len(pending_ids)}")
@@ -110,7 +113,7 @@ def main() -> None:
                 arxiv_id = p["arxiv_id"]
                 title = p["title"]
 
-                if is_paper_processed(db_path, arxiv_id, date_folder):
+                if is_paper_processed(db_path, arxiv_id, email_date_folder):
                     print(f"跳过已处理论文: {arxiv_id}")
                     continue
 
@@ -120,13 +123,13 @@ def main() -> None:
                     note_content = build_paper_note(
                         paper=p,
                         summary=summary_result,
-                        date_folder=date_folder,
+                        date_folder=email_date_folder,
                     )
 
                     note_path = write_paper_note(
                         vault_path=vault_path,
                         papers_root=papers_root,
-                        date_folder=date_folder,
+                        date_folder=email_date_folder,
                         arxiv_id=arxiv_id,
                         title=title,
                         content=note_content,
@@ -134,7 +137,7 @@ def main() -> None:
 
                     note_name = make_note_filename(arxiv_id, title).replace(".md", "")
 
-                    index_items.append({
+                    index_items_by_date[email_date_folder].append({
                         "note_name": note_name,
                         "one_sentence_summary": summary_result["one_sentence_summary"],
                         "note_path": str(note_path),
@@ -143,7 +146,7 @@ def main() -> None:
                     mark_paper_processed(
                         db_path=db_path,
                         arxiv_id=arxiv_id,
-                        date_folder=date_folder,
+                        date_folder=email_date_folder,
                         gmail_message_id=gmail_message_id,
                         title=title,
                         note_path=str(note_path),
@@ -158,7 +161,7 @@ def main() -> None:
                     mark_paper_processed(
                         db_path=db_path,
                         arxiv_id=arxiv_id,
-                        date_folder=date_folder,
+                        date_folder=email_date_folder,
                         gmail_message_id=gmail_message_id,
                         title=title,
                         note_path="",
@@ -176,6 +179,8 @@ def main() -> None:
                 processed_at=now_iso(),
                 status="success",
             )
+            print("邮件接收时间:", detail["received_at"])
+            print("目录日期:", email_date_folder)
 
         except Exception as e:
             mark_email_processed(
@@ -189,7 +194,10 @@ def main() -> None:
             print(f"处理邮件失败: {gmail_message_id} | {e}")
             traceback.print_exc()
 
-    if index_items:
+    for date_folder, index_items in index_items_by_date.items():
+        if not index_items:
+            continue
+
         index_content = build_daily_index(
             date_folder=date_folder,
             papers=index_items,
@@ -201,6 +209,7 @@ def main() -> None:
             date_folder=date_folder,
             content=index_content,
         )
+
         print(f"写入每日索引: {index_path}")
 
     print(f"本次成功处理论文数: {processed_count}")

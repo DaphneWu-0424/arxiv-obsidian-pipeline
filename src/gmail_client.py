@@ -4,6 +4,7 @@ import base64
 import os
 from typing import List, Dict, Any
 import time
+from datetime import datetime
 from requests.exceptions import ChunkedEncodingError, RequestException
 
 from google.auth.transport.requests import Request, AuthorizedSession
@@ -68,6 +69,13 @@ def get_message_text(session: AuthorizedSession, message_id: str) -> Dict[str, A
             break
 
     snippet = msg.get("snippet", "")
+    internal_date_ms = msg.get("internalDate")
+    received_at = None
+    date_folder = None
+
+    if internal_date_ms:
+        received_at = datetime.fromtimestamp(int(internal_date_ms) / 1000)
+        date_folder = received_at.strftime("%Y-%m-%d")
 
     def extract_text_from_part(part):
         mime_type = part.get("mimeType", "")
@@ -91,4 +99,7 @@ def get_message_text(session: AuthorizedSession, message_id: str) -> Dict[str, A
         "subject": subject,
         "snippet": snippet,
         "body": body_text,
+        "internal_date_ms": internal_date_ms,
+        "received_at": received_at.isoformat() if received_at else "",
+        "date_folder": date_folder or "",
     }
