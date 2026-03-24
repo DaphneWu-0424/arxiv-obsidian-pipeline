@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 
 import gmail_client
 from email_parser import extract_arxiv_ids_from_content
+from summarizer import summarize_from_abstract
 from arxiv_client import fetch_batch_metadata
 from gmail_client import build_gmail_session, list_recent_arxiv_messages, get_message_text
 
@@ -31,17 +32,21 @@ def main():
         arxiv_ids = extract_arxiv_ids_from_content(detail["body"])
         print("arXiv IDs count:", len(arxiv_ids))
         print("First 10 arXiv IDs:", arxiv_ids[:10])
-        test_ids = arxiv_ids[:5]
+        test_ids = arxiv_ids[:3]
         papers = fetch_batch_metadata(test_ids)
 
         print(f"Fetched {len(papers)} papers from arXiv API")
         for p in papers:
             print("-" * 60)
             print("ID:", p["arxiv_id"])
+            print("Version:", p["arxiv_version"])
             print("Title:", p["title"])
             print("Authors:", ", ".join(p["authors"][:5]))
             print("Categories:", p["categories"])
             print("Summary preview:", p["summary"][:200])
+            summary_result = summarize_from_abstract(p)
+            print("AI one_sentence_summary:", summary_result["one_sentence_summary"])
+            print("AI key_points:", summary_result["key_points"])
 
 
 if __name__ == "__main__":
