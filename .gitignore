@@ -148,3 +148,6 @@ Desktop.ini
 
 # Local configuration files (if any)
 *.local
+
+config/credentials.json
+config/token.json
