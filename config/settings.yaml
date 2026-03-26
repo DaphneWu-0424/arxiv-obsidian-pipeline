@@ -8,3 +8,10 @@ database_path: "data/pipeline.db"
 log_dir: "data/logs"
 pdf_cache_dir: "data/pdfs"
 max_workers: 20
+pdf_cache_dir: "data/pdfs"
+html_cache_dir: "data/html"
+use_html_first: true
+max_pdf_pages_for_extract: 20
+max_fulltext_chars: 120000
+enable_paper_enrichment: true
+http_timeout: 30

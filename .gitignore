@@ -153,3 +153,4 @@ config/credentials.json
 config/token.json
 
 data/pipeline.db
+data/
